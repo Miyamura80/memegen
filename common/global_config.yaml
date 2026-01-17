@@ -115,3 +115,62 @@ telegram:
 server:
   allowed_origins:
     - "http://localhost:8080"
+
+########################################################
+# Meme Generator
+########################################################
+meme_generator:
+  default_num_candidates: 4
+  max_candidates: 25
+  default_timeout: 30  # Increased for nano banana pro thinking mode
+  default_resolution: "1K"  # Options: "1K", "2K", "4K"
+  default_render_format: "png"
+
+  # Performance targets
+  prompt_only_p50_target: 10  # Slightly increased for nano banana pro
+  url_based_p50_target: 18
+
+  # Cost controls
+  max_web_sources: 5
+  max_templates_per_request: 50
+  max_reference_images: 14  # Nano banana pro supports up to 14 reference images (6 objects + 5 humans + logos)
+  # Note: Image file size limits should be verified during implementation against actual Gemini API constraints
+
+  # Embedding configuration
+  embedding_dimension: 768  # CRITICAL: Changing this requires regenerating all embeddings and DB migration
+  # Options: 768 (balanced), 1536 (higher quality), 3072 (full Gemini default)
+  # Tradeoff: Lower dims = faster search, less storage; Higher dims = better quality, slower search
+
+llm_providers:
+  gemini:
+    default_model: "gemini/gemini-3-flash-preview"
+    image_generation_model: "gemini-3-pro-image-preview"  # Nano banana pro for meme generation (high-quality text rendering, up to 14 reference images)
+    enable_web_search: true  # Uses Gemini's native grounding with Google Search (billing applies per grounded query)
+    embedding_model: "gemini-embedding-001"  # For template semantic search
+
+logo_service:
+  image_base_url: "https://img.logo.dev"  # Image CDN endpoint (uses publishable key pk_* via ?token= query param)
+  api_base_url: "https://api.logo.dev"     # API endpoint for search/metadata (uses secret key sk_* via Authorization header)
+  cache_ttl: 3600
+  # Note: Free tier requires visible attribution link to logo.dev
+  # Two key types: publishable (pk_*) for client-side images, secret (sk_*) for server-side API calls
+
+object_storage:
+  provider: "railway"  # Uses Railway Buckets (S3-compatible, private only)
+  bucket: "memegen-outputs"
+  signed_url_expiry: 3600  # Seconds (Railway supports up to 90 days max)
+
+ranking:
+  weights:
+    relevance: 0.3
+    humor: 0.25
+    clarity: 0.2
+    originality: 0.15
+    safety: 0.1
+
+  allow_per_request_override: true
+
+safety:
+  default_mode: "standard"
+  strict_mode_templates: []
+  blocked_tags: ["nsfw", "explicit", "hate"]

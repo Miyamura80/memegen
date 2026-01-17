@@ -26,6 +26,12 @@ from common.config_models import (
     StripeConfig,
     TelegramConfig,
     ServerConfig,
+    MemeGeneratorConfig,
+    LlmProvidersConfig,
+    LogoServiceConfig,
+    ObjectStorageConfig,
+    RankingConfig,
+    SafetyConfig,
 )
 from common.db_uri_resolver import resolve_db_uri
 
@@ -153,6 +159,12 @@ class Config(BaseSettings):
     stripe: StripeConfig
     telegram: TelegramConfig
     server: ServerConfig
+    meme_generator: MemeGeneratorConfig
+    llm_providers: LlmProvidersConfig
+    logo_service: LogoServiceConfig
+    object_storage: ObjectStorageConfig
+    ranking: RankingConfig
+    safety: SafetyConfig
 
     # Environment variables (required)
     DEV_ENV: str
@@ -176,6 +188,8 @@ class Config(BaseSettings):
 
     # Optional environment variables
     RAILWAY_PRIVATE_DOMAIN: str | None = Field(default=None)
+    LOGO_DEV_PUBLISHABLE_KEY: str | None = Field(default=None)
+    LOGO_DEV_SECRET_KEY: str | None = Field(default=None)
 
     # Runtime environment (computed)
     is_local: bool = Field(default=False)
