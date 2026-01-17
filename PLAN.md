@@ -9,46 +9,146 @@ This plan outlines the implementation of the Context-Aware Meme Generator API ba
 ### Goal
 Establish basic API infrastructure and generate memes from text prompts without URL context.
 
+### Project Structure
+```
+src/
+├── api/
+│   ├── routes/
+│   │   └── meme/
+│   │       ├── __init__.py
+│   │       └── generate.py
+│   ├── auth/
+│   │   └── unified_auth.py
+│   └── limits.py
+├── db/
+│   ├── models/
+│   │   └── public/
+│   │       └── templates.py
+│   └── utils/
+│       └── template_repository.py
+├── services/
+│   └── meme/
+│       ├── __init__.py
+│       ├── orchestrator.py
+│       ├── context/
+│       │   ├── __init__.py
+│       │   ├── builder.py
+│       │   └── models.py
+│       ├── templates/
+│       │   ├── __init__.py
+│       │   ├── loader.py
+│       │   ├── selector.py
+│       │   └── models.py
+│       ├── generation/
+│       │   ├── __init__.py
+│       │   ├── caption_generator.py
+│       │   └── image_renderer.py
+│       ├── scoring/
+│       │   ├── __init__.py
+│       │   └── scorer.py
+│       ├── safety/
+│       │   ├── __init__.py
+│       │   └── analyzer.py
+│       └── storage/
+│           ├── __init__.py
+│           └── image_storage.py
+└── utils/
+
+data/
+├── templates/
+│   ├── template_001.jpg
+│   ├── template_002.jpg
+│   └── ...
+├── outputs/
+└── templates.json
+```
+
+### 0.0 Template Annotation & Initial Dataset
+
+**Goal**: Create initial template dataset with rich metadata before building the system.
+
+**Steps**:
+1. Ask Eito to provide 5-10 meme template images
+2. Save images locally in `data/templates/` as `template_001.jpg`, `template_002.jpg`, etc.
+3. For each template, manually annotate:
+   - `template_id`: Unique identifier
+   - `name`: Template name (e.g., "Drake Hotline Bling", "Distracted Boyfriend")
+   - `format`: "single", "two-panel", "four-panel", etc.
+   - `text_areas`: Number and description of text areas (e.g., "top text, bottom text" or "panel 1, panel 2")
+   - `aspect_ratio`: Preferred aspect ratio (e.g., "1:1", "4:3", "16:9")
+   - `tags`: Array of relevant tags (e.g., ["reaction", "comparison", "tech"])
+   - `tone_affinity`: Array of tones (e.g., ["dry", "savage", "wholesome"])
+   - `example_captions`: Array of example caption sets
+4. Store metadata in `data/templates.json`:
+```json
+{
+  "templates": [
+    {
+      "template_id": "template_001",
+      "name": "Drake Hotline Bling",
+      "format": "two-panel",
+      "image_path": "data/templates/template_001.jpg",
+      "text_areas": "Two panels: top text for rejection, bottom text for approval",
+      "aspect_ratio": "1:1",
+      "tags": ["reaction", "comparison", "choice"],
+      "tone_affinity": ["dry", "savage"],
+      "example_captions": [
+        ["Old way of doing things", "New better way"],
+        ["Bug in production", "Ignoring it until Monday"]
+      ]
+    }
+  ]
+}
+```
+
+**Note**: Phase 0 uses local files + JSON for rapid iteration. Migration to Postgres + pgvector happens in Phase 1.5 after core functionality is validated.
+
 ### 0.1 Project Setup & Configuration
+
+**Note**: Add corresponding Pydantic models to `common/config_models.py` for type validation (MemeGeneratorConfig, GeminiConfig with embedding_dimension as Literal[768, 1536, 3072])
 
 **Config additions to `global_config.yaml`:**
 ```yaml
 meme_generator:
-  default_num_candidates: 10
+  default_num_candidates: 4
   max_candidates: 25
-  default_timeout: 25
-  default_render_size: 768
+  default_timeout: 30  # Increased for nano banana pro thinking mode
+  default_resolution: "1K"  # Options: "1K", "2K", "4K"
   default_render_format: "png"
 
   # Performance targets
-  prompt_only_p50_target: 8
-  url_based_p50_target: 15
+  prompt_only_p50_target: 10  # Slightly increased for nano banana pro
+  url_based_p50_target: 18
 
   # Cost controls
   max_web_sources: 5
   max_templates_per_request: 50
+  max_reference_images: 14  # Nano banana pro supports up to 14 reference images (6 objects + 5 humans + logos)
+  # Note: Image file size limits should be verified during implementation against actual Gemini API constraints
+
+  # Embedding configuration
+  embedding_dimension: 768  # CRITICAL: Changing this requires regenerating all embeddings and DB migration
+  # Options: 768 (balanced), 1536 (higher quality), 3072 (full Gemini default)
+  # Tradeoff: Lower dims = faster search, less storage; Higher dims = better quality, slower search
 
 llm_providers:
-  google_nano_banana:
-    api_key_env: "GOOGLE_NANO_BANANA_API_KEY"
-    base_url: "https://api.google.com/nano-banana-pro/v1"
-    default_model: "nano-banana-pro-1"
-
-  openai_web_search:
-    api_key_env: "OPENAI_API_KEY"
-    model: "gpt-4-turbo-preview"
-    enable_web_search: true
+  gemini:
+    default_model: "gemini/gemini-3-flash-preview"
+    image_generation_model: "gemini-3-pro-image-preview"  # Nano banana pro for meme generation (high-quality text rendering, up to 14 reference images)
+    enable_web_search: true  # Uses Gemini's native grounding with Google Search (billing applies per grounded query)
+    embedding_model: "gemini-embedding-001"  # For template semantic search
 
 logo_service:
-  base_url: "https://api.logo.dev/v1"
-  api_key_env: "LOGO_DEV_API_KEY"
+  image_base_url: "https://img.logo.dev"  # Image CDN endpoint (uses publishable key pk_* via ?token= query param)
+  api_base_url: "https://api.logo.dev"     # API endpoint for search/metadata (uses secret key sk_* via Authorization header)
   cache_ttl: 3600
+  # Note: Free tier requires visible attribution link to logo.dev
+  # Two key types: publishable (pk_*) for client-side images, secret (sk_*) for server-side API calls
 
 object_storage:
-  provider: "s3"  # or "local" for dev
+  provider: "railway"  # Uses Railway Buckets (S3-compatible, private only)
   bucket: "memegen-outputs"
-  region: "us-east-1"
-  signed_url_expiry: 3600
+  signed_url_expiry: 3600  # Seconds (Railway supports up to 90 days max)
 
 ranking:
   weights:
@@ -68,1343 +168,489 @@ safety:
 
 **Environment variables in `.env`:**
 ```
-GOOGLE_NANO_BANANA_API_KEY=...
-OPENAI_API_KEY=...
-LOGO_DEV_API_KEY=...
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
+GEMINI_API_KEY=...
+LOGO_DEV_PUBLISHABLE_KEY=pk_...  # For client-side image CDN requests (img.logo.dev)
+LOGO_DEV_SECRET_KEY=sk_...       # For server-side API calls (api.logo.dev - search/metadata)
 ```
 
-### 0.2 Database Schema
-
-**Create Alembic migration for templates table:**
-
-```python
-# alembic/versions/001_create_templates.py
-
-def upgrade():
-    # Main templates table
-    op.create_table(
-        'templates',
-        sa.Column('template_id', sa.String(50), primary_key=True),
-        sa.Column('name', sa.String(200), nullable=False),
-        sa.Column('image_uri', sa.String(500), nullable=False),
-        sa.Column('format', sa.Enum('single', 'two-panel', 'four-panel', 'multi-panel', 'freeform', name='template_format'), nullable=False),
-        sa.Column('text_boxes', sa.JSON, nullable=True),  # Optional: coords, max_chars, alignment
-        sa.Column('tags', sa.ARRAY(sa.String), nullable=True),
-        sa.Column('tone_affinity', sa.ARRAY(sa.String), nullable=True),
-        sa.Column('safety_flags', sa.ARRAY(sa.String), nullable=True),
-        sa.Column('example_captions', sa.JSON, nullable=True),
-        sa.Column('constraints', sa.JSON, nullable=True),  # max text length, avoid topics
-        sa.Column('external_assets', sa.JSON, nullable=True),  # logo requirements
-        sa.Column('license', sa.String(100), nullable=False),
-        sa.Column('attribution', sa.String(500), nullable=True),
-        sa.Column('embedding', sa.ARRAY(sa.Float), nullable=True),  # Vector embedding
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column('updated_at', sa.DateTime(timezone=True), onupdate=sa.func.now()),
-    )
-
-    # Indices
-    op.create_index('idx_templates_tags', 'templates', ['tags'], postgresql_using='gin')
-    op.create_index('idx_templates_format', 'templates', ['format'])
-
-    # Meme candidates table (for caching/retrieval)
-    op.create_table(
-        'meme_candidates',
-        sa.Column('candidate_id', sa.String(50), primary_key=True),
-        sa.Column('trace_id', sa.String(50), nullable=False),
-        sa.Column('template_id', sa.String(50), sa.ForeignKey('templates.template_id')),
-        sa.Column('captions', sa.JSON, nullable=False),
-        sa.Column('image_uri', sa.String(500), nullable=True),
-        sa.Column('alt_text', sa.String(500), nullable=True),
-        sa.Column('explanation', sa.Text, nullable=True),
-        sa.Column('scores', sa.JSON, nullable=False),  # humor, relevance, etc.
-        sa.Column('citations', sa.JSON, nullable=True),
-        sa.Column('request_params', sa.JSON, nullable=False),  # Original request
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
-    )
-
-    op.create_index('idx_candidates_trace', 'meme_candidates', ['trace_id'])
-
-    # Request logs table
-    op.create_table(
-        'request_logs',
-        sa.Column('trace_id', sa.String(50), primary_key=True),
-        sa.Column('prompt', sa.Text, nullable=True),  # Nullable for privacy opt-out
-        sa.Column('url', sa.String(1000), nullable=True),
-        sa.Column('url_fetch_status', sa.String(50), nullable=True),
-        sa.Column('num_candidates_requested', sa.Integer, nullable=False),
-        sa.Column('num_candidates_generated', sa.Integer, nullable=False),
-        sa.Column('safety_decisions', sa.JSON, nullable=True),
-        sa.Column('warnings', sa.ARRAY(sa.String), nullable=True),
-        sa.Column('latency_ms', sa.Integer, nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now()),
-    )
+**Dependencies to add:**
+```bash
+uv add google-genai  # Gemini 3 Pro Image (nano banana pro) for high-quality meme image generation
+uv add numpy         # In-memory cosine similarity (Phase 1), ARM macOS optimized with Accelerate
 ```
 
-### 0.3 Core Data Models
-
-**Create `src/models/meme_models.py`:**
-
-```python
-from pydantic import BaseModel, Field
-from typing import Optional, Literal
-from datetime import datetime
-
-
-# Request models
-class RenderConfig(BaseModel):
-    size: Literal[512, 768, 1024] = 768
-    format: Literal["png", "jpg", "webp"] = "png"
-    watermark: bool = False
-
-
-class TemplateFilters(BaseModel):
-    include_tags: Optional[list[str]] = None
-    exclude_tags: Optional[list[str]] = None
-    template_ids: Optional[list[str]] = None
-    format: Optional[Literal["single", "two-panel", "four-panel", "caption-only"]] = None
-
-
-class MemeGenerateRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=2000)
-    url: Optional[str] = None
-    num_candidates: int = Field(default=10, ge=1, le=25)
-    tone: Optional[Literal["dry", "wholesome", "savage", "absurdist", "neutral"]] = None
-    audience: Optional[Literal["general", "tech", "finance", "sports"]] = None
-    style: Optional[Literal["classic-impact", "modern", "minimal"]] = None
-    safety_mode: Literal["strict", "standard"] = "standard"
-    template_filters: Optional[TemplateFilters] = None
-    render: RenderConfig = Field(default_factory=RenderConfig)
-    language: str = "en"
-
-
-# Response models
-class MemeScores(BaseModel):
-    humor: float = Field(..., ge=0.0, le=1.0)
-    relevance: float = Field(..., ge=0.0, le=1.0)
-    clarity: float = Field(..., ge=0.0, le=1.0)
-    safety: float = Field(..., ge=0.0, le=1.0)
-    originality: float = Field(..., ge=0.0, le=1.0)
-
-
-class MemeCandidate(BaseModel):
-    candidate_id: str
-    template_id: str
-    template_name: str
-    captions: list[str]
-    image_url: str
-    alt_text: str
-    explanation: str
-    scores: MemeScores
-    citations: Optional[list[str]] = None
-
-
-class MemeGenerateResponse(BaseModel):
-    trace_id: str
-    candidates: list[MemeCandidate]
-    warnings: Optional[list[str]] = None
-
-
-# Internal models
-class StoryBrief(BaseModel):
-    who: Optional[str] = None
-    what: str
-    when: Optional[str] = None
-    where: Optional[str] = None
-    key_events: list[str]
-    main_tension: str
-    reactions: list[str] = []
-    key_entities: list[str] = []
-    required_assets: list[str] = []
-    sentiment: str
-```
-
-### 0.4 Database Access Layer
-
-**Create `src/db/template_repository.py`:**
-
-```python
-from typing import Optional
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
-from src.db.models import Template
-from loguru import logger as log
-
-
-class TemplateRepository:
-    def __init__(self, session: AsyncSession):
-        self.session = session
-
-    async def get_template(self, template_id: str) -> Optional[Template]:
-        result = await self.session.execute(
-            select(Template).where(Template.template_id == template_id)
-        )
-        return result.scalar_one_or_none()
-
-    async def list_templates(
-        self,
-        format_filter: Optional[str] = None,
-        include_tags: Optional[list[str]] = None,
-        exclude_tags: Optional[list[str]] = None,
-        limit: int = 50
-    ) -> list[Template]:
-        query = select(Template)
-
-        if format_filter:
-            query = query.where(Template.format == format_filter)
-
-        if include_tags:
-            query = query.where(Template.tags.overlap(include_tags))
-
-        if exclude_tags:
-            query = query.where(~Template.tags.overlap(exclude_tags))
-
-        query = query.limit(limit)
-
-        result = await self.session.execute(query)
-        return list(result.scalars().all())
-
-    async def create_template(self, template: Template) -> Template:
-        self.session.add(template)
-        await self.session.commit()
-        await self.session.refresh(template)
-        return template
-```
-
-### 0.5 API Routes
-
-**Create `src/api/v1/meme_routes.py`:**
-
-```python
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from src.models.meme_models import MemeGenerateRequest, MemeGenerateResponse
-from src.services.meme_orchestrator import MemeOrchestrator
-from src.db.session import get_db_session
-from loguru import logger as log
-import uuid
-
-router = APIRouter(prefix="/v1/memes", tags=["memes"])
-
-
-@router.post("/generate", response_model=MemeGenerateResponse)
-async def generate_memes(
-    request: MemeGenerateRequest,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """Generate N meme candidates from prompt and optional URL."""
-    trace_id = f"tr_{uuid.uuid4().hex[:16]}"
-
-    log.info(f"[{trace_id}] Generating memes",
-             num_candidates=request.num_candidates,
-             has_url=request.url is not None)
-
-    try:
-        orchestrator = MemeOrchestrator(db=db, trace_id=trace_id)
-        response = await orchestrator.generate(request)
-        return response
-    except Exception as e:
-        log.error(f"[{trace_id}] Generation failed", error=str(e))
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@router.get("/{candidate_id}")
-async def get_meme_candidate(
-    candidate_id: str,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """Retrieve metadata for a specific meme candidate."""
-    # TODO: Implement candidate retrieval
-    pass
-```
-
-### 0.6 Core Service: Meme Orchestrator
-
-**Create `src/services/meme_orchestrator.py`:**
-
-```python
-from sqlalchemy.ext.asyncio import AsyncSession
-from src.models.meme_models import (
-    MemeGenerateRequest,
-    MemeGenerateResponse,
-    MemeCandidate
-)
-from src.services.context_builder import ContextBuilder
-from src.services.template_selector import TemplateSelector
-from src.services.meme_generator import MemeGenerator
-from src.services.meme_scorer import MemeScorer
-from loguru import logger as log
-from common import global_config
-
-
-class MemeOrchestrator:
-    """Orchestrates the end-to-end meme generation pipeline."""
-
-    def __init__(self, db: AsyncSession, trace_id: str):
-        self.db = db
-        self.trace_id = trace_id
-        self.context_builder = ContextBuilder()
-        self.template_selector = TemplateSelector(db)
-        self.meme_generator = MemeGenerator()
-        self.scorer = MemeScorer()
-
-    async def generate(self, request: MemeGenerateRequest) -> MemeGenerateResponse:
-        """Main generation pipeline."""
-
-        # Step 1: Build context (story brief or prompt brief)
-        log.info(f"[{self.trace_id}] Building context")
-        context = await self.context_builder.build(
-            prompt=request.prompt,
-            url=request.url
-        )
-
-        # Step 2: Select candidate templates
-        log.info(f"[{self.trace_id}] Selecting templates")
-        templates = await self.template_selector.select(
-            context=context,
-            filters=request.template_filters,
-            tone=request.tone,
-            num_candidates=request.num_candidates
-        )
-
-        # Step 3: Generate meme candidates (parallel)
-        log.info(f"[{self.trace_id}] Generating {len(templates)} candidates")
-        candidates = await self.meme_generator.generate_batch(
-            context=context,
-            templates=templates,
-            request=request,
-            trace_id=self.trace_id
-        )
-
-        # Step 4: Score and rank candidates
-        log.info(f"[{self.trace_id}] Scoring candidates")
-        scored_candidates = await self.scorer.score_and_rank(
-            candidates=candidates,
-            request=request
-        )
-
-        return MemeGenerateResponse(
-            trace_id=self.trace_id,
-            candidates=scored_candidates,
-            warnings=None
-        )
-```
-
-### 0.7 Context Builder Service (Phase 0: Prompt-only)
-
-**Create `src/services/context_builder.py`:**
-
-```python
-from typing import Optional
-from src.models.meme_models import StoryBrief
-from utils.llm.dspy_inference import DSPYInference
-import dspy
-from loguru import logger as log
-
-
-class ContextBuilderSignature(dspy.Signature):
-    """Extract structured context from a meme prompt."""
-    prompt: str = dspy.InputField(desc="User's meme generation prompt")
-    url: Optional[str] = dspy.InputField(desc="Optional URL for context", default=None)
-
-    story_brief: str = dspy.OutputField(desc="Structured story brief as JSON")
-
-
-class ContextBuilder:
-    """Builds story brief from prompt (and URL in later phases)."""
-
-    def __init__(self):
-        self.inference = DSPYInference(
-            pred_signature=ContextBuilderSignature,
-            observe=True
-        )
-
-    async def build(self, prompt: str, url: Optional[str] = None) -> StoryBrief:
-        """
-        Phase 0: Extracts context from prompt only.
-        Phase 1+: Will add URL fetching and web search.
-        """
-
-        if url:
-            log.warning("URL provided but URL context building not yet implemented")
-
-        # Generate story brief
-        result = await self.inference.run(
-            prompt=prompt,
-            url=url
-        )
-
-        # Parse and return
-        import json
-        brief_data = json.loads(result.story_brief)
-        return StoryBrief(**brief_data)
-```
-
-### 0.8 Template Selection Service
-
-**Create `src/services/template_selector.py`:**
-
-```python
-from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
-from src.db.template_repository import TemplateRepository
-from src.models.meme_models import StoryBrief, TemplateFilters
-from src.db.models import Template
-from loguru import logger as log
-
-
-class TemplateSelector:
-    """Selects best-fit templates based on context and filters."""
-
-    def __init__(self, db: AsyncSession):
-        self.repo = TemplateRepository(db)
-
-    async def select(
-        self,
-        context: StoryBrief,
-        filters: Optional[TemplateFilters],
-        tone: Optional[str],
-        num_candidates: int
-    ) -> list[Template]:
-        """
-        Phase 0: Basic filtering by tags/format.
-        Phase 2+: Semantic search using embeddings.
-        """
-
-        # Apply filters
-        include_tags = filters.include_tags if filters else None
-        exclude_tags = filters.exclude_tags if filters else None
-        format_filter = filters.format if filters else None
-
-        # Get candidate templates
-        templates = await self.repo.list_templates(
-            format_filter=format_filter,
-            include_tags=include_tags,
-            exclude_tags=exclude_tags,
-            limit=num_candidates * 2  # Over-fetch for diversity
-        )
-
-        # Phase 0: Simple random selection
-        # Phase 2+: Re-rank by semantic similarity and tone affinity
-        import random
-        selected = random.sample(templates, min(num_candidates, len(templates)))
-
-        log.info(f"Selected {len(selected)} templates from {len(templates)} candidates")
-        return selected
-```
-
-### 0.9 Meme Generation Service
-
-**Create `src/services/meme_generator.py`:**
-
-```python
-import asyncio
-import uuid
-from src.models.meme_models import StoryBrief, MemeGenerateRequest, MemeCandidate, MemeScores
-from src.db.models import Template
-from src.services.image_storage import ImageStorage
-from common import global_config
-from loguru import logger as log
-
-
-class MemeGenerator:
-    """Generates meme images using Google Nano Banana Pro."""
-
-    def __init__(self):
-        self.storage = ImageStorage()
-        self.api_key = global_config.GOOGLE_NANO_BANANA_API_KEY
-
-    async def generate_batch(
-        self,
-        context: StoryBrief,
-        templates: list[Template],
-        request: MemeGenerateRequest,
-        trace_id: str
-    ) -> list[MemeCandidate]:
-        """Generate meme candidates in parallel."""
-
-        tasks = [
-            self._generate_single(context, template, request, trace_id)
-            for template in templates
-        ]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Filter out errors
-        candidates = [r for r in results if not isinstance(r, Exception)]
-
-        log.info(f"[{trace_id}] Generated {len(candidates)}/{len(templates)} candidates")
-        return candidates
-
-    async def _generate_single(
-        self,
-        context: StoryBrief,
-        template: Template,
-        request: MemeGenerateRequest,
-        trace_id: str
-    ) -> MemeCandidate:
-        """Generate a single meme candidate."""
-
-        # Build generation prompt
-        prompt = self._build_generation_prompt(context, template, request)
-
-        # Call Nano Banana Pro API
-        image_data = await self._call_nano_banana(prompt)
-
-        # Upload to storage
-        candidate_id = f"m_{uuid.uuid4().hex[:16]}"
-        image_url = await self.storage.upload(
-            image_data=image_data,
-            candidate_id=candidate_id,
-            format=request.render.format
-        )
-
-        # TODO: Extract captions from image or metadata
-        captions = []
-
-        # Generate alt text
-        alt_text = f"Meme using {template.name} template"
-
-        # Generate explanation
-        explanation = f"Selected {template.name} for its {template.format} format"
-
-        # Placeholder scores (will be filled by scorer)
-        scores = MemeScores(
-            humor=0.5,
-            relevance=0.5,
-            clarity=0.5,
-            safety=0.5,
-            originality=0.5
-        )
-
-        return MemeCandidate(
-            candidate_id=candidate_id,
-            template_id=template.template_id,
-            template_name=template.name,
-            captions=captions,
-            image_url=image_url,
-            alt_text=alt_text,
-            explanation=explanation,
-            scores=scores,
-            citations=None
-        )
-
-    def _build_generation_prompt(
-        self,
-        context: StoryBrief,
-        template: Template,
-        request: MemeGenerateRequest
-    ) -> str:
-        """Build the prompt for image generation."""
-
-        prompt = f"""Generate a meme image based on:
-
-Context: {context.what}
-Tension: {context.main_tension}
-Template: {template.name} ({template.format})
-
-Requirements:
-- Tone: {request.tone or 'neutral'}
-- Audience: {request.audience or 'general'}
-- Safety: {request.safety_mode}
-"""
-        return prompt
-
-    async def _call_nano_banana(self, prompt: str) -> bytes:
-        """Call Google Nano Banana Pro API."""
-        # TODO: Implement actual API call
-        # For now, return placeholder
-        log.warning("Nano Banana API not yet implemented")
-        return b""
-```
-
-### 0.10 Scoring Service
-
-**Create `src/services/meme_scorer.py`:**
-
-```python
-from src.models.meme_models import MemeCandidate, MemeGenerateRequest, MemeScores
-from utils.llm.dspy_inference import DSPYInference
-import dspy
-from common import global_config
-from loguru import logger as log
-
-
-class ScoringSignature(dspy.Signature):
-    """Score a meme candidate on multiple dimensions."""
-    context: str = dspy.InputField()
-    template_name: str = dspy.InputField()
-    explanation: str = dspy.InputField()
-    dimension: str = dspy.InputField(desc="humor, relevance, clarity, safety, or originality")
-
-    score: float = dspy.OutputField(desc="Score from 0.0 to 1.0")
-    reasoning: str = dspy.OutputField()
-
-
-class MemeScorer:
-    """Scores and ranks meme candidates."""
-
-    def __init__(self):
-        self.inference = DSPYInference(
-            pred_signature=ScoringSignature,
-            observe=True
-        )
-
-    async def score_and_rank(
-        self,
-        candidates: list[MemeCandidate],
-        request: MemeGenerateRequest
-    ) -> list[MemeCandidate]:
-        """Score all candidates and return ranked list."""
-
-        # Score each candidate on all dimensions
-        for candidate in candidates:
-            scores = await self._score_candidate(candidate)
-            candidate.scores = scores
-
-        # Rank by weighted score
-        ranked = self._rank_candidates(candidates, request)
-
-        return ranked
-
-    async def _score_candidate(self, candidate: MemeCandidate) -> MemeScores:
-        """Score a single candidate on all dimensions."""
-
-        dimensions = ["humor", "relevance", "clarity", "safety", "originality"]
-        scores = {}
-
-        for dim in dimensions:
-            result = await self.inference.run(
-                context=candidate.explanation,
-                template_name=candidate.template_name,
-                explanation=candidate.explanation,
-                dimension=dim
-            )
-            scores[dim] = float(result.score)
-
-        return MemeScores(**scores)
-
-    def _rank_candidates(
-        self,
-        candidates: list[MemeCandidate],
-        request: MemeGenerateRequest
-    ) -> list[MemeCandidate]:
-        """Rank candidates by weighted score."""
-
-        weights = global_config.meme_generator.ranking.weights
-
-        def compute_score(candidate: MemeCandidate) -> float:
-            s = candidate.scores
-            return (
-                weights.relevance * s.relevance +
-                weights.humor * s.humor +
-                weights.clarity * s.clarity +
-                weights.originality * s.originality +
-                weights.safety * s.safety
-            )
-
-        ranked = sorted(candidates, key=compute_score, reverse=True)
-        return ranked
-```
-
-### 0.11 Image Storage Service
-
-**Create `src/services/image_storage.py`:**
-
-```python
-import boto3
-from botocore.exceptions import ClientError
-from common import global_config
-from loguru import logger as log
-
-
-class ImageStorage:
-    """Handles image upload and signed URL generation."""
-
-    def __init__(self):
-        self.s3_client = boto3.client(
-            's3',
-            region_name=global_config.object_storage.region
-        )
-        self.bucket = global_config.object_storage.bucket
-
-    async def upload(
-        self,
-        image_data: bytes,
-        candidate_id: str,
-        format: str
-    ) -> str:
-        """Upload image to S3 and return signed URL."""
-
-        key = f"memes/{candidate_id}.{format}"
-
-        try:
-            self.s3_client.put_object(
-                Bucket=self.bucket,
-                Key=key,
-                Body=image_data,
-                ContentType=f"image/{format}"
-            )
-
-            # Generate signed URL
-            url = self.s3_client.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': self.bucket, 'Key': key},
-                ExpiresIn=global_config.object_storage.signed_url_expiry
-            )
-
-            return url
-
-        except ClientError as e:
-            log.error(f"S3 upload failed for {candidate_id}", error=str(e))
-            raise
-```
+### 0.2 Core Data Models
+
+**Create `src/api/routes/meme/generate.py` with Pydantic models:**
+- `MemeGenerateRequest`: Prompt, URL, num_candidates, tone, audience, style, safety_mode, template_filters, render config
+- `MemeGenerateResponse`: trace_id, candidates list, warnings
+- `MemeCandidate`: candidate_id, template info, captions, image_url, scores, citations
+- `MemeScores`: humor, relevance, clarity, safety, originality (0.0-1.0)
+
+**Create `src/services/meme/context/models.py` for internal models:**
+- `StoryBrief`: Context extraction model (who/what/when/where, key_events, main_tension, sentiment, required_assets)
+
+**Create `src/services/meme/templates/models.py`:**
+- `Template`: Template dataclass loaded from JSON (Phase 0) or DB (Phase 1.5+)
+
+### 0.3 Template Loader (Phase 0: JSON-based)
+
+**Create `src/services/meme/templates/loader.py`:**
+- Loads templates from `data/templates.json`
+- Methods: `get_template()`, `list_templates()`, `filter_by_tags()`
+- Simple in-memory filtering by format, tags (include/exclude)
+
+**Note**: Phase 1.5 will migrate to `src/db/utils/template_repository.py` with Postgres + pgvector
+
+### 0.4 API Routes
+
+**Create `src/api/routes/meme/generate.py`:**
+- Define Pydantic models: `MemeGenerateRequest`, `MemeGenerateResponse`, `MemeCandidate`, etc.
+- `POST /v1/memes/generate`: Main endpoint
+  - Uses `get_authenticated_user(request, db)` from `unified_auth` (returns AuthenticatedUser with id and email)
+  - Uses `ensure_daily_limit(db, user_uuid, limit_name, enforce)` from `limits` (takes uuid.UUID, not string)
+- `GET /v1/memes/{candidate_id}`: Retrieve specific meme metadata (Phase 1.5+)
+- Register in `src/api/routes/__init__.py` following existing pattern
+
+### 0.5 Core Service: Meme Orchestrator
+
+**Create `src/services/meme/orchestrator.py`:**
+
+Pipeline:
+1. Build context using `ContextBuilder` (extracts StoryBrief from prompt using gemini-3-flash-preview)
+2. Select templates using `TemplateSelector` (filters by tags, format, tone)
+3. Generate captions using LLM (gemini-3-flash-preview based on context and template)
+4. Generate meme images using nano banana pro (Gemini 3 Pro Image) with template + captions + optional logos
+5. Score and rank candidates using `MemeScorer` (LLM-based scoring on 5 dimensions)
+
+### 0.6 Context Builder Service (Phase 0: Prompt-only)
+
+**Create `src/services/meme/context/builder.py`:**
+- Uses DSPYInference with gemini/gemini-3-flash-preview (LLM for text understanding)
+- Extracts structured StoryBrief from prompt (who, what, tension, sentiment, required_assets)
+- Decorated with `@observe()` for LangFuse tracing (note the parentheses)
+- Phase 0: Prompt-only, Phase 2+: Will add URL fetching and web search
+
+### 0.7 Template Selection Service
+
+**Create `src/services/meme/templates/selector.py`:**
+- Phase 0: Loads from JSON via `TemplateLoader`, basic filtering by tags/format, random selection
+- Phase 3+: Semantic search using pgvector embeddings and tone affinity re-ranking
+
+### 0.8 Meme Generation Services
+
+**Create `src/services/meme/generation/caption_generator.py`:**
+- Uses DSPYInference with gemini/gemini-3-flash-preview (LLM) to generate witty captions
+- Takes context (StoryBrief), template metadata, tone/audience as input
+- Decorated with `@observe()` for LangFuse tracing (note the parentheses)
+- Returns list of caption texts matching the template format (e.g., ["top text", "bottom text"] for two-panel)
+
+**Create `src/services/meme/generation/meme_generator.py`:**
+- Uses Gemini 3 Pro Image (nano banana pro) API for image generation
+- Takes template image, captions, and optional logo images as input
+- Constructs multimodal prompt with:
+  - Template image (as base64 or file path)
+  - Caption text in natural language (e.g., "Add 'TOP TEXT' at top and 'BOTTOM TEXT' at bottom in bold white Impact font with black stroke, meme style")
+  - Optional brand logos (up to 14 reference images supported)
+- Decorated with `@observe()` for LangFuse tracing (note the parentheses)
+- Returns generated meme image (saves to `data/outputs/` in Phase 0, uploads to Railway in Phase 1.5+)
+- Model: `gemini-3-pro-image-preview` (supports 1K/2K/4K resolutions, improved text rendering)
+- Config: Supports aspect ratio control via `image_config.aspect_ratio` (1:1, 3:2, 2:3, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9)
+- Features: "Thinking" mode for better composition, grounding with Google Search
+
+**Benefits of using nano banana pro over manual text overlay:**
+- No need to manage fonts, text wrapping, positioning, stroke effects manually
+- **Superior text rendering quality** - significantly improved legible, stylized text
+- Can handle complex layouts and multi-panel templates naturally
+- Supports up to **14 reference images** (6 for objects + 5 for humans + additional logos)
+- **"Thinking" mode** - internal reasoning for better composition before final output
+- **Higher resolution options** - 1K, 2K, 4K (default 1K)
+- **More aspect ratios** - 1:1, 3:2, 2:3, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9
+- Optional grounding with Google Search for real-world context
+- Simplifies codebase by removing PIL/Pillow dependencies and custom rendering logic
+- SynthID watermark automatically included
+
+### 0.9 Scoring Service
+
+**Create `src/services/meme/scoring/scorer.py`:**
+- Uses DSPYInference with gemini/gemini-3-flash-preview (LLM) to score candidates on 5 dimensions
+- Decorated with `@observe()` for LangFuse tracing (note the parentheses)
+- Ranks by weighted sum (configurable in `global_config.yaml`)
+- Returns sorted list of candidates
+
+### 0.10 Image Storage Service
+
+**Create `src/services/meme/storage/image_storage.py`:**
+- Phase 0: Save to `data/outputs/` directory, return file paths
+- Phase 1.5+: Upload to Railway Buckets (S3-compatible), return presigned URLs with configurable expiry
+  - Note: Railway Buckets are private by default; use presigned URLs for temporary access
+  - Max expiry: 90 days (config defaults to 3600s/1 hour)
+- Handles error cases and logging
 
 ---
 
-## Phase 1: URL Context & Web Search
+## Phase 1: Embeddings & Semantic Search (JSON-based)
+
+### Goal
+Add vector embeddings and semantic template selection while still using JSON for rapid iteration.
+
+### 1.1 Embedding Generation (JSON-based)
+**Create `src/services/meme/templates/embedding_service.py`:**
+- Use Gemini embeddings API (model from `global_config.llm_providers.gemini.embedding_model`)
+- Generate embeddings from template metadata (name, tags, tone_affinity, example_captions)
+- **Embedding dimension**: Read from `global_config.meme_generator.embedding_dimension` (default: 768)
+  - Pass to Gemini API via `output_dimensionality` parameter
+  - Note: Gemini supports 768, 1536, 3072 dimensions
+  - Tradeoff: Lower dims = faster search, less storage; Higher dims = better quality
+  - **CRITICAL**: Once set and deployed, changing dimension requires:
+    1. Regenerating all embeddings (cost + time)
+    2. Alembic migration to alter vector column type
+    3. Downtime or dual-write strategy during migration
+- Store embeddings in `data/templates.json` as arrays
+- Add embedding generation script: `scripts/generate_embeddings.py`
+
+**Update `data/templates.json` schema:**
+```json
+{
+  "embedding_dimension": 768,  // Must match global_config.meme_generator.embedding_dimension
+  "templates": [
+    {
+      "template_id": "template_001",
+      "name": "Drake Hotline Bling",
+      "embedding": [0.123, -0.456, 0.789, ...],  // Length must match embedding_dimension
+      ...
+    }
+  ]
+}
+```
+
+**Note**: The `embedding_dimension` field serves as validation to catch dimension mismatches early.
+
+### 1.2 In-Memory Semantic Search
+**Update `src/services/meme/templates/selector.py`:**
+- Load all templates with embeddings into memory
+- Validate embedding dimensions match config on startup (fail fast if mismatch)
+- Embed the query context using EmbeddingService (dimension from config)
+- Calculate cosine similarity in-memory (use numpy)
+  - Note: Normalize vectors before cosine similarity (Gemini embeddings at lower dims aren't auto-normalized)
+- Sort by similarity score
+- Re-rank by tone affinity if specified
+- Return top N diverse templates
+
+**Benefits of testing with JSON first:**
+- Fast iteration with 5-10 templates
+- Validate embedding quality and similarity matching
+- Tune similarity thresholds without DB complexity
+- Easy to inspect and debug embeddings
+
+---
+
+## Phase 1.5: Database Migration (After embedding validation)
+
+### Goal
+Migrate from JSON files to Postgres once basic functionality is proven.
+
+### 1.5.1 Database Schema
+
+**Create Alembic migration for three main tables:**
+- `templates`: Stores meme templates with metadata (format, tags, tone_affinity, embeddings, constraints, external_assets)
+- `meme_candidates`: Caches generated memes with scores and citations  
+- `request_logs`: Tracks API requests for analytics and safety monitoring
+
+### 1.5.2 Migration Script
+- Read `data/templates.json`
+- Insert all templates into Postgres `templates` table
+- Update `src/services/meme/templates/loader.py` → `src/db/utils/template_repository.py`
+- Move images from `data/templates/` to Railway storage
+- Update `ImageStorage` to use Railway instead of local files
+
+---
+
+## Phase 2: pgvector Migration
+
+### Goal
+Migrate embeddings from JSON to Postgres with pgvector for better performance at scale.
+
+### 2.1 pgvector Setup
+
+**CRITICAL: Railway Postgres Requirements**
+- Standard Railway Postgres does NOT include pgvector by default
+- Must deploy using a pgvector-enabled template from Railway marketplace (e.g., `pgvector-pg18`)
+- Cannot simply enable pgvector on existing vanilla Railway Postgres instances
+
+**Setup Steps:**
+- Alembic migration to enable pgvector extension: `CREATE EXTENSION IF NOT EXISTS vector;`
+- Add embedding column with dimension from config (read `global_config.meme_generator.embedding_dimension` in migration)
+- **CRITICAL Migration Warning**:
+  - The vector dimension is FIXED once the column is created
+  - Changing `global_config.meme_generator.embedding_dimension` after this migration requires:
+    1. Creating new column with new dimension
+    2. Regenerating ALL embeddings (expensive API calls)
+    3. Backfilling new column
+    4. Updating all queries
+    5. Dropping old column
+  - **Recommendation**: Test extensively in Phase 1 (JSON) before committing to a dimension
+- Add IVFFlat index for fast cosine similarity search:
+  - Syntax: `CREATE INDEX ... USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);`
+  - Tune `lists` parameter: ~100 for small datasets, `sqrt(num_rows)` for larger datasets
+  - Set `ivfflat.probes` at query time to balance speed vs accuracy
+  - Don't create index until 1000+ templates (sequential scan is faster for small datasets)
+
+### 2.2 Embedding Migration
+- Migrate embeddings from `data/templates.json` to Postgres
+- Update `TemplateRepository` to support vector queries
+
+### 2.3 Update Template Selector
+- Update `src/services/meme/templates/selector.py` to use pgvector
+- Query: Embed context → pgvector cosine similarity search → filter by format/tags
+- Keep same logic as Phase 1, but use database instead of in-memory
+
+---
+
+## Phase 3: URL Context & Web Search
 
 ### Goal
 Add URL ingestion and web search to build richer story briefs.
 
-### 1.1 Enhanced Context Builder
+### 3.1 Enhanced Context Builder
+- Update `src/services/meme/context/builder.py`
+- Add web search support using Gemini's native grounding with Google Search
+  - Enable via `tools: [{"google_search": {}}]` in request
+  - Returns structured metadata with web sources and citations
+  - Note: Billing applies per grounded query (started Jan 5, 2026)
+- Return both StoryBrief and citations list
+- Route: URL provided → web search, else → prompt-only
 
-**Update `src/services/context_builder.py`:**
+### 3.2 Logo Resolution Service
+- Create `src/services/meme/context/logo_service.py`
+- Fetch brand logos via logo.dev:
+  - Use `img.logo.dev/{domain}?token={LOGO_DEV_PUBLISHABLE_KEY}` for direct image URLs
+  - Use `api.logo.dev` with `Authorization: Bearer {LOGO_DEV_SECRET_KEY}` for search/metadata if needed
+- Cache results (TTL in config)
+- Graceful fallback if logo not found
 
-```python
-class WebSearchContextSignature(dspy.Signature):
-    """Build story brief using web search (via OpenAI with search enabled)."""
-    prompt: str = dspy.InputField()
-    url: str = dspy.InputField()
-
-    story_brief: str = dspy.OutputField(desc="Structured JSON story brief")
-    citations: list[str] = dspy.OutputField(desc="List of source URLs used")
-
-
-class ContextBuilder:
-    def __init__(self):
-        # Use OpenAI with web search for URL contexts
-        self.web_inference = DSPYInference(
-            pred_signature=WebSearchContextSignature,
-            observe=True,
-            model="openai/gpt-4-turbo-preview"  # With web search enabled
-        )
-
-        # Existing prompt-only inference
-        self.prompt_inference = DSPYInference(
-            pred_signature=ContextBuilderSignature,
-            observe=True
-        )
-
-    async def build(self, prompt: str, url: Optional[str] = None) -> tuple[StoryBrief, list[str]]:
-        """Build context with optional URL and web search."""
-
-        if url:
-            # Use web search
-            result = await self.web_inference.run(prompt=prompt, url=url)
-            brief_data = json.loads(result.story_brief)
-            return StoryBrief(**brief_data), result.citations
-        else:
-            # Prompt-only
-            result = await self.prompt_inference.run(prompt=prompt)
-            brief_data = json.loads(result.story_brief)
-            return StoryBrief(**brief_data), []
-```
-
-### 1.2 Logo Resolution Service
-
-**Create `src/services/logo_service.py`:**
-
-```python
-import aiohttp
-from common import global_config
-from loguru import logger as log
-
-
-class LogoService:
-    """Fetches brand logos on-demand via logo.dev."""
-
-    def __init__(self):
-        self.base_url = global_config.logo_service.base_url
-        self.api_key = global_config.LOGO_DEV_API_KEY
-
-    async def fetch_logo(self, company: str) -> Optional[str]:
-        """Fetch logo URL for a company. Returns None if not found."""
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{self.base_url}/search",
-                    params={"q": company},
-                    headers={"Authorization": f"Bearer {self.api_key}"}
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("logo_url")
-                    else:
-                        log.warning(f"Logo fetch failed for {company}", status=resp.status)
-                        return None
-        except Exception as e:
-            log.error(f"Logo fetch error for {company}", error=str(e))
-            return None
-```
-
-### 1.3 Update Meme Generator for Asset Resolution
-
-**Update `src/services/meme_generator.py`:**
-
-```python
-from src.services.logo_service import LogoService
-
-class MemeGenerator:
-    def __init__(self):
-        self.storage = ImageStorage()
-        self.logo_service = LogoService()
-        self.api_key = global_config.GOOGLE_NANO_BANANA_API_KEY
-
-    async def _generate_single(
-        self,
-        context: StoryBrief,
-        template: Template,
-        request: MemeGenerateRequest,
-        trace_id: str
-    ) -> MemeCandidate:
-        """Generate with logo resolution if needed."""
-
-        # Resolve logos if template requires them
-        logos = {}
-        if template.external_assets and context.required_assets:
-            for asset in context.required_assets:
-                logo_url = await self.logo_service.fetch_logo(asset)
-                if logo_url:
-                    logos[asset] = logo_url
-
-        # Build generation prompt with logos
-        prompt = self._build_generation_prompt(context, template, request, logos)
-
-        # ... rest of generation
-```
+### 3.3 Asset Resolution in Generator
+- Update `src/services/meme/generation/meme_generator.py`
+- Resolve logos for templates requiring external assets via LogoService
+- Pass logo images directly to nano banana pro as additional image inputs (multimodal, up to 14 total)
+- Nano banana pro will integrate logos into the final meme during image generation
 
 ---
 
-## Phase 2: Template Embeddings & Semantic Search
-
-### Goal
-Implement vector embeddings for templates and semantic search.
-
-### 2.1 Embedding Generation
-
-**Create `src/services/embedding_service.py`:**
-
-```python
-from openai import AsyncOpenAI
-from common import global_config
-
-
-class EmbeddingService:
-    """Generate embeddings for templates and queries."""
-
-    def __init__(self):
-        self.client = AsyncOpenAI(api_key=global_config.OPENAI_API_KEY)
-        self.model = "text-embedding-3-small"
-
-    async def embed_text(self, text: str) -> list[float]:
-        """Generate embedding for text."""
-        response = await self.client.embeddings.create(
-            model=self.model,
-            input=text
-        )
-        return response.data[0].embedding
-
-    async def embed_template(self, template: Template) -> list[float]:
-        """Generate embedding for template metadata."""
-
-        text_parts = [
-            template.name,
-            " ".join(template.tags or []),
-            " ".join(template.tone_affinity or [])
-        ]
-
-        if template.example_captions:
-            text_parts.extend([str(ex) for ex in template.example_captions])
-
-        text = " ".join(text_parts)
-        return await self.embed_text(text)
-```
-
-### 2.2 Alembic Migration for pgvector
-
-**Create migration for vector extension:**
-
-```python
-# alembic/versions/002_add_pgvector.py
-
-def upgrade():
-    # Enable pgvector extension
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-
-    # Change embedding column to vector type
-    op.execute("ALTER TABLE templates ALTER COLUMN embedding TYPE vector(1536)")
-
-    # Add vector similarity index
-    op.execute("CREATE INDEX idx_templates_embedding ON templates USING ivfflat (embedding vector_cosine_ops)")
-```
-
-### 2.3 Enhanced Template Selector with Semantic Search
-
-**Update `src/services/template_selector.py`:**
-
-```python
-from src.services.embedding_service import EmbeddingService
-from sqlalchemy import text
-
-class TemplateSelector:
-    def __init__(self, db: AsyncSession):
-        self.repo = TemplateRepository(db)
-        self.embedding_service = EmbeddingService()
-
-    async def select(
-        self,
-        context: StoryBrief,
-        filters: Optional[TemplateFilters],
-        tone: Optional[str],
-        num_candidates: int
-    ) -> list[Template]:
-        """Select templates using semantic search."""
-
-        # Build query text from context
-        query_text = f"{context.what} {context.main_tension}"
-        query_embedding = await self.embedding_service.embed_text(query_text)
-
-        # Semantic search using pgvector
-        query = text("""
-            SELECT template_id, name, format, tags, tone_affinity,
-                   (embedding <=> :query_embedding) as distance
-            FROM templates
-            WHERE 1=1
-        """)
-
-        # Apply filters
-        if filters and filters.format:
-            query = text(str(query) + " AND format = :format")
-
-        query = text(str(query) + " ORDER BY distance LIMIT :limit")
-
-        result = await self.repo.session.execute(
-            query,
-            {
-                "query_embedding": query_embedding,
-                "format": filters.format if filters else None,
-                "limit": num_candidates * 2
-            }
-        )
-
-        template_ids = [row.template_id for row in result]
-
-        # Load full templates
-        templates = []
-        for tid in template_ids:
-            t = await self.repo.get_template(tid)
-            if t:
-                templates.append(t)
-
-        # Re-rank by tone affinity
-        if tone:
-            templates = self._rerank_by_tone(templates, tone)
-
-        # Ensure diversity (no duplicates)
-        return templates[:num_candidates]
-
-    def _rerank_by_tone(self, templates: list[Template], tone: str) -> list[Template]:
-        """Re-rank by tone affinity."""
-        def tone_score(t: Template) -> float:
-            if t.tone_affinity and tone in t.tone_affinity:
-                return 1.0
-            return 0.0
-
-        return sorted(templates, key=tone_score, reverse=True)
-```
-
----
-
-## Phase 3: Safety Tuning & Sensitive Topics
+## Phase 4: Safety Tuning & Sensitive Topics
 
 ### Goal
 Implement robust safety checks and sensitive topic handling.
 
-### 3.1 Safety Analyzer Service
+### 4.1 Safety Analyzer Service
+- Create `src/services/meme/safety/analyzer.py`
+- Use DSPYInference with gemini/gemini-3-flash-preview (LLM)
+- Decorated with `@observe()` for LangFuse tracing (note the parentheses)
+- Pre-generation check: Analyze prompt/URL for policy violations
+- Return: is_safe, blocked_reason, safe_alternative suggestion
+- Tragedy downgrade: Filter edgy/savage templates for sensitive topics
 
-**Create `src/services/safety_analyzer.py`:**
-
-```python
-from utils.llm.dspy_inference import DSPYInference
-import dspy
-from loguru import logger as log
-
-
-class SafetyCheckSignature(dspy.Signature):
-    """Analyze content for safety concerns."""
-    prompt: str = dspy.InputField()
-    url_context: Optional[str] = dspy.InputField(default=None)
-
-    is_safe: bool = dspy.OutputField()
-    concern_categories: list[str] = dspy.OutputField()
-    reasoning: str = dspy.OutputField()
-    safe_alternative: Optional[str] = dspy.OutputField()
-
-
-class SafetyAnalyzer:
-    """Analyzes requests and candidates for safety violations."""
-
-    BLOCKED_CATEGORIES = [
-        "hate_speech",
-        "targeted_harassment",
-        "csam",
-        "self_harm",
-        "doxxing",
-        "graphic_violence"
-    ]
-
-    def __init__(self):
-        self.inference = DSPYInference(
-            pred_signature=SafetyCheckSignature,
-            observe=True
-        )
-
-    async def check_request(
-        self,
-        prompt: str,
-        url_context: Optional[str] = None,
-        safety_mode: str = "standard"
-    ) -> tuple[bool, Optional[str], Optional[str]]:
-        """
-        Check if request is safe.
-        Returns: (is_safe, blocked_reason, safe_alternative)
-        """
-
-        result = await self.inference.run(
-            prompt=prompt,
-            url_context=url_context
-        )
-
-        if not result.is_safe:
-            blocked_categories = [
-                c for c in result.concern_categories
-                if c in self.BLOCKED_CATEGORIES
-            ]
-
-            if blocked_categories:
-                reason = f"Content violates policy: {', '.join(blocked_categories)}"
-                return False, reason, result.safe_alternative
-
-        return True, None, None
-
-    async def downgrade_templates_for_tragedy(
-        self,
-        templates: list[Template],
-        context: StoryBrief
-    ) -> list[Template]:
-        """Filter out edgy templates for tragedy/violence topics."""
-
-        # Check if context involves tragedy
-        tragedy_keywords = ["death", "shooting", "attack", "tragedy", "disaster"]
-        is_tragedy = any(kw in context.what.lower() for kw in tragedy_keywords)
-
-        if is_tragedy:
-            # Filter out templates with edgy tags
-            edgy_tags = ["savage", "dark", "edgy", "controversial"]
-            filtered = [
-                t for t in templates
-                if not any(tag in (t.tags or []) for tag in edgy_tags)
-            ]
-            log.info(f"Filtered {len(templates) - len(filtered)} edgy templates for tragedy topic")
-            return filtered
-
-        return templates
-```
-
-### 3.2 Update Orchestrator with Safety Checks
-
-**Update `src/services/meme_orchestrator.py`:**
-
-```python
-from src.services.safety_analyzer import SafetyAnalyzer
-
-class MemeOrchestrator:
-    def __init__(self, db: AsyncSession, trace_id: str):
-        # ... existing services
-        self.safety_analyzer = SafetyAnalyzer()
-
-    async def generate(self, request: MemeGenerateRequest) -> MemeGenerateResponse:
-        """Pipeline with safety checks."""
-
-        # Pre-generation safety check
-        is_safe, blocked_reason, safe_alt = await self.safety_analyzer.check_request(
-            prompt=request.prompt,
-            url_context=request.url,
-            safety_mode=request.safety_mode
-        )
-
-        if not is_safe:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "unsafe_content",
-                    "reason": blocked_reason,
-                    "safe_alternative": safe_alt
-                }
-            )
-
-        # Build context
-        context = await self.context_builder.build(
-            prompt=request.prompt,
-            url=request.url
-        )
-
-        # Select templates
-        templates = await self.template_selector.select(
-            context=context,
-            filters=request.template_filters,
-            tone=request.tone,
-            num_candidates=request.num_candidates
-        )
-
-        # Downgrade templates if tragedy/violence
-        templates = await self.safety_analyzer.downgrade_templates_for_tragedy(
-            templates, context
-        )
-
-        # ... rest of pipeline
-```
+### 4.2 Orchestrator Integration
+- Update `src/services/meme/orchestrator.py`
+- Add safety check before context building
+- Return 422 error with safe_alternative if blocked
+- Apply template downgrade for sensitive topics before generation
 
 ---
 
-## Phase 4: Template Management & Admin Features
+## Phase 5: Template Management & Admin Features
 
 ### Goal
 Enable template CRUD operations and admin tools.
 
-### 4.1 Template Admin Routes
-
-**Create `src/api/v1/template_routes.py`:**
-
-```python
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from src.db.template_repository import TemplateRepository
-from src.db.models import Template
-from src.services.embedding_service import EmbeddingService
-from src.db.session import get_db_session
-
-router = APIRouter(prefix="/v1/templates", tags=["templates"])
-
-
-@router.get("")
-async def list_templates(
-    format: Optional[str] = None,
-    tags: Optional[str] = None,
-    limit: int = 50,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """List templates with optional filters."""
-    repo = TemplateRepository(db)
-
-    include_tags = tags.split(",") if tags else None
-
-    templates = await repo.list_templates(
-        format_filter=format,
-        include_tags=include_tags,
-        limit=limit
-    )
-
-    return {"templates": templates}
-
-
-@router.get("/{template_id}")
-async def get_template(
-    template_id: str,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """Get template details."""
-    repo = TemplateRepository(db)
-    template = await repo.get_template(template_id)
-
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
-
-    return template
-
-
-@router.post("")
-async def create_template(
-    template: Template,
-    db: AsyncSession = Depends(get_db_session)
-):
-    """Create new template with embedding generation."""
-    repo = TemplateRepository(db)
-    embedding_service = EmbeddingService()
-
-    # Generate embedding
-    template.embedding = await embedding_service.embed_template(template)
-
-    created = await repo.create_template(template)
-    return created
-```
+### 5.1 Template Admin Routes
+- Create `src/api/routes/templates/admin.py`
+- `GET /v1/templates`: List templates with filters (format, tags, limit)
+- `GET /v1/templates/{template_id}`: Get template details
+- `POST /v1/templates`: Create template with auto-embedding generation
+- `PATCH /v1/templates/{template_id}`: Update template metadata
+- `DELETE /v1/templates/{template_id}`: Soft-delete template
+- Use existing auth from `unified_auth.py`
 
 ---
 
 ## Testing Strategy
 
-### Phase 0 Tests
-
-**Create `tests/test_meme_orchestrator.py`:**
-
-```python
-from tests.test_template import TestTemplate
-from src.services.meme_orchestrator import MemeOrchestrator
-from src.models.meme_models import MemeGenerateRequest
-import pytest
-
-
-class TestMemeOrchestrator(TestTemplate):
-    @pytest.mark.asyncio
-    async def test_prompt_only_generation(self, db_session):
-        """Test basic prompt-only meme generation."""
-        orchestrator = MemeOrchestrator(db=db_session, trace_id="test_trace")
-
-        request = MemeGenerateRequest(
-            prompt="Make a meme about coffee addiction",
-            num_candidates=3
-        )
-
-        response = await orchestrator.generate(request)
-
-        assert response.trace_id == "test_trace"
-        assert len(response.candidates) <= 3
-        assert all(c.template_id for c in response.candidates)
-```
-
-**Create `tests/test_template_selector.py`:**
-
-```python
-from tests.test_template import TestTemplate
-from src.services.template_selector import TemplateSelector
-from src.models.meme_models import StoryBrief
-import pytest
-
-
-class TestTemplateSelector(TestTemplate):
-    @pytest.mark.asyncio
-    async def test_basic_selection(self, db_session):
-        """Test template selection with filters."""
-        selector = TemplateSelector(db=db_session)
-
-        context = StoryBrief(
-            what="Tech startup fails",
-            main_tension="overhyped vs reality",
-            key_events=[],
-            sentiment="negative"
-        )
-
-        templates = await selector.select(
-            context=context,
-            filters=None,
-            tone="dry",
-            num_candidates=5
-        )
-
-        assert len(templates) <= 5
-```
+### Key Test Areas
+- **Unit tests**: Test individual services in `src/services/meme/`
+  - `tests/unit/meme/test_context_builder.py`
+  - `tests/unit/meme/test_template_selector.py`
+  - `tests/unit/meme/test_caption_generator.py`
+  - `tests/unit/meme/test_scorer.py`
+- **Integration tests**: `tests/integration/test_meme_orchestrator.py`
+- **E2E tests**: `tests/e2e/test_meme_generation.py`
+  - Follow existing pattern from `tests/e2e/test_ping.py` and `E2ETestBase`
+  - Use real Gemini API calls for testing
+- **Performance tests**: Latency benchmarks (P50/P95 targets)
+- **Safety tests** (Phase 4): Policy violation detection, tragedy downgrade
 
 ---
 
 ## Deployment Checklist
 
-### Environment Setup
-- [ ] Create `.env` with all API keys
-- [ ] Set up Postgres with pgvector extension
-- [ ] Set up S3 bucket for image storage
-- [ ] Configure LangFuse for observability
+### Phase 0 Setup (Local JSON iteration)
+- [ ] Create `.env` with `GEMINI_API_KEY`
+- [ ] Create `data/templates/` and `data/outputs/` directories
+- [ ] Ask Eito for 5-10 initial template images
+- [ ] Manually annotate templates in `data/templates.json` (without embeddings)
+- [ ] Configure LangFuse for LLM observability
+- [ ] Install dependencies: `uv add google-genai numpy`
 
-### Database
+### Phase 1 Setup (Embeddings with JSON)
+- [ ] **CRITICAL**: Finalize `embedding_dimension` in `global_config.yaml` (768 recommended for <1000 templates)
+- [ ] Run `uv run python -m scripts.generate_embeddings` to add embeddings to JSON
+- [ ] Test semantic search quality with 5-10 templates
+- [ ] **Experiment with different dimensions** (768 vs 1536 vs 3072) to validate quality vs performance tradeoff
+  - Run A/B tests on template selection quality
+  - Measure search latency and memory usage
+  - **Lock in dimension before Phase 2** - changing later is expensive
+- [ ] Tune similarity thresholds and ranking weights
+
+### Phase 1.5+ (Database migration)
+- [ ] Add `LOGO_DEV_PUBLISHABLE_KEY` (pk_*) and `LOGO_DEV_SECRET_KEY` (sk_*) to `.env` (note: free tier requires attribution link to logo.dev)
+- [ ] Set up Postgres on Railway (use standard template for now, will migrate to pgvector template in Phase 2)
 - [ ] Run `alembic upgrade head`
-- [ ] Seed initial templates (Phase 0: 10-20 templates)
-- [ ] Generate embeddings for all templates (Phase 2+)
+- [ ] Run migration script to import JSON → Postgres (including embeddings)
+- [ ] Configure Railway Buckets for image uploads (S3-compatible, private only - use presigned URLs for access)
 
-### Dependencies
-- [ ] Run `make setup`
-- [ ] Install Google Nano Banana SDK
-- [ ] Install pgvector drivers
+### Phase 2 (pgvector)
+- [ ] **CRITICAL**: Deploy NEW Railway Postgres using pgvector template from marketplace (e.g., `pgvector-pg18`)
+- [ ] Migrate data from Phase 1.5 database to pgvector-enabled database using `pg_dump` and restore
+- [ ] Enable pgvector extension: `CREATE EXTENSION IF NOT EXISTS vector;`
+- [ ] Run pgvector migration
+- [ ] Verify vector search performance
 
 ### Configuration
 - [ ] Update `global_config.yaml` with all settings
-- [ ] Set ranking weights
-- [ ] Configure safety mode defaults
+- [ ] Set ranking weights and safety defaults
 - [ ] Set performance targets and timeouts
 
-### Testing
-- [ ] Run `make test`
-- [ ] Run `make ci` (ruff, vulture, ty)
+### Testing & CI
+- [ ] Run `make test`, `make fmt`, `make ruff`, `make vulture`
+- [ ] Run `make ci` to verify all checks pass
 - [ ] Load test with 10 concurrent requests
 
 ### Monitoring
-- [ ] Set up LangFuse traces
-- [ ] Configure latency alerts (P95 > 20s)
-- [ ] Track safety refusal rate
-- [ ] Monitor template coverage
+- [ ] Set up LangFuse traces for all LLM calls (gemini/gemini-3-flash-preview with @observe() decorator)
+- [ ] Set up LangFuse traces for image generation (gemini-3-pro-image-preview with @observe() decorator)
+- [ ] Configure latency alerts (P95 > 25s to account for nano banana pro thinking mode)
+- [ ] Track safety refusal rate and template coverage
+- [ ] Monitor image generation quality and text rendering accuracy
 
 ---
 
 ## Implementation Order Summary
 
-1. **Phase 0** (Weeks 1-2)
-   - Database schema + migrations
-   - Core API routes
-   - Prompt-only context builder
-   - Basic template selection (random)
-   - Meme generation via Nano Banana
-   - LLM-based scoring
-   - Image storage
+1. **Phase 0** (Week 1-2: Basic functionality with JSON)
+   - **Ask Eito for 5-10 template images** and annotate in `data/templates.json`
+   - Set up folder structure: `src/services/meme/` with subdirectories
+   - Core API route: `src/api/routes/meme/generate.py` (follows pattern from `agent.py`)
+   - Prompt-only context builder (gemini/gemini-3-flash-preview LLM with `@observe()`)
+   - Basic template selection from JSON (filtering, random)
+   - Meme generation using Gemini 3 Pro Image (nano banana pro) - takes template + captions + optional logos, outputs final image with superior text rendering
+   - LLM-based scoring (gemini/gemini-3-flash-preview with `@observe()`)
+   - Local file storage in `data/outputs/`
+   - Auth: Reuse `get_authenticated_user` from `unified_auth.py`
+   - Rate limiting: Reuse `ensure_daily_limit` from `limits.py` (takes uuid.UUID, not string)
 
-2. **Phase 1** (Week 3)
-   - URL context + web search
+2. **Phase 1** (Week 3: Embeddings & semantic search with JSON)
+   - Generate embeddings using Gemini embeddings API
+   - Store embeddings in `data/templates.json`
+   - Implement in-memory cosine similarity search (numpy)
+   - Update template selector to use semantic search
+   - **Benefit**: Test and tune embeddings with 5-10 templates before DB complexity
+
+3. **Phase 1.5** (Week 4: Database migration after embedding validation)
+   - Database schema + Alembic migrations (follow existing pattern in `alembic/versions/`)
+   - Migrate JSON → Postgres (templates + embeddings)
+   - Update `loader.py` → `template_repository.py` (follow pattern from `src/db/utils/`)
+   - Railway storage integration
+
+4. **Phase 2** (Week 5: pgvector migration)
+   - Enable pgvector extension
+   - Migrate embeddings to vector column
+   - Update selector to use pgvector instead of in-memory search
+
+5. **Phase 3** (Week 6: Richer context)
+   - URL context + web search (Gemini)
    - Logo resolution service
    - Citation tracking
 
-3. **Phase 2** (Week 4)
-   - Template embeddings
-   - pgvector setup
-   - Semantic search
-   - Tone-based re-ranking
-
-4. **Phase 3** (Week 5)
-   - Safety analyzer
+6. **Phase 4** (Week 7: Safety)
+   - Safety analyzer (gemini/gemini-3-flash-preview LLM with `@observe()`)
    - Sensitive topic detection
    - Template downgrading for tragedies
 
-5. **Phase 4** (Week 6)
-   - Template CRUD API
+7. **Phase 5** (Week 8: Admin features)
+   - Template CRUD API (new route: `src/api/routes/templates/admin.py`)
    - Admin features
    - Custom template uploads
+
+## Key Patterns to Follow
+
+- **Auth**: Use `get_authenticated_user(request, db)` from `src/api/auth/unified_auth.py` (returns AuthenticatedUser with id and email)
+- **Rate Limiting**: Use `ensure_daily_limit(db, user_uuid, limit_name, enforce)` from `src/api/limits.py` (takes uuid.UUID, not string)
+- **LLM Calls**: Use `DSPYInference` from `utils/llm/dspy_inference.py` with `@observe()` decorator (note the parentheses)
+  - Import: `from langfuse.decorators import observe, langfuse_context`
+  - Can update observation name: `langfuse_context.update_current_observation(name="custom-name")`
+- **Database**: Use `scoped_session()` and `db_transaction(db)` from `src/db/utils/db_transaction.py`
+- **Route Registration**: Add to `src/api/routes/__init__.py` following existing pattern (import router, add to all_routers list)
+- **Testing**: Follow `E2ETestBase` pattern from `tests/e2e/e2e_test_base.py`
 
 ---
 
 ## Open Questions & Decisions Needed
 
-1. **Google Nano Banana Pro API**: Is this a real API? Need actual endpoint details.
-2. **Template seed data**: Where do we get the initial 10-20 templates?
-3. **Watermark design**: What should the watermark look like?
-4. **Rate limiting**: Should we add rate limiting at the API gateway level?
-5. **Cost tracking**: Should we track per-request costs (LLM calls + storage)?
-6. **Authentication**: How do we handle API key authentication?
+1. **Embedding dimension choice** (MUST DECIDE IN PHASE 1):
+   - 768-dim: Faster search, less storage, sufficient for <1000 templates (recommended starting point)
+   - 1536-dim: Balanced quality and performance
+   - 3072-dim: Full Gemini quality, slower search, more storage
+   - **CRITICAL**: This decision is nearly irreversible after Phase 2 migration to pgvector
+   - Run quality experiments in Phase 1 (JSON) before committing
+2. **Watermark design**: What should the watermark look like? (Note: nano banana pro includes SynthID watermark automatically)
+3. **Rate limiting**: Should we add rate limiting at the API gateway level?
+4. **Cost tracking**: Should we track per-request costs (LLM + image generation calls)?
+5. **Authentication**: Reuse existing API key auth system from agent routes
+6. **Prompt engineering**: Fine-tune prompts for nano banana pro to consistently generate meme-style text (bold, white with black stroke, etc.)
+7. **Resolution selection**: Should we allow users to specify resolution (1K/2K/4K) or always use default 1K?
 
 ---
 
+## Embedding Dimension Recommendation
+
+**For this project, start with 768-dim embeddings:**
+
+**Rationale:**
+- Template dataset will likely stay under 1000 templates (even with user uploads)
+- 768-dim provides 75% of the quality at 25% of the storage/compute cost vs 3072-dim
+- In-memory search with 768-dim vectors is fast enough (<10ms for 1000 templates)
+- Gemini embedding quality at 768-dim is sufficient for meme template selection (not mission-critical precision)
+
+**When to consider higher dimensions:**
+- If template selection quality is poor in Phase 1 experiments
+- If dataset grows beyond 10,000 templates
+- If templates become highly similar (need finer-grained distinctions)
+
+**Migration path if dimension change is needed:**
+1. Keep old dimension in production
+2. Generate new embeddings with new dimension (offline batch job)
+3. A/B test both dimensions in production
+4. If new dimension performs better, schedule migration
+5. Create migration script with validation and rollback plan
+6. Execute during low-traffic window
+
 ## Next Steps
 
-1. Review this plan with the team
-2. Make decisions on open questions
-3. Set up development environment
-4. Begin Phase 0 implementation
-5. Create initial template seed data
+1. **Ask Eito to provide 5-10 meme template images** for initial dataset
+2. Review this plan with the team
+3. Set up development environment (`.env`, directories, install Pillow + numpy)
+4. Begin Phase 0.0: Template annotation (without embeddings)
+5. Begin Phase 0: Core implementation with JSON-based templates
+6. Once Phase 0 works, move to Phase 1: Generate embeddings and test semantic search with JSON
+   - **CRITICAL**: Experiment with 768/1536/3072 dimensions in Phase 1 before committing
+7. After validating embeddings work well, proceed to Phase 1.5: Database migration
