@@ -72,7 +72,9 @@ exclude = [
     "src/api/auth/",
     "src/utils/integration/",
     "src/stripe/",
-    "scripts/"
+    "scripts/",
+    "src/services/meme/context/models.py",
+    "src/services/meme/templates/models.py"
 ]
 ignore_names = [
     "apply_referral",

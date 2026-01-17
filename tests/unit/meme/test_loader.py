@@ -1,8 +1,6 @@
 import pytest
-from pathlib import Path
 import json
 from src.services.meme.templates.loader import TemplateLoader
-from src.services.meme.templates.models import Template
 
 @pytest.fixture
 def mock_templates_file(tmp_path):
