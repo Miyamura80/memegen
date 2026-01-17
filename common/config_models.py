@@ -167,3 +167,75 @@ class ServerConfig(BaseModel):
     """Server configuration."""
 
     allowed_origins: list[str]
+
+
+class MemeGeneratorConfig(BaseModel):
+    """Meme generator configuration."""
+
+    default_num_candidates: int
+    max_candidates: int
+    default_timeout: int
+    default_resolution: str
+    default_render_format: str
+    prompt_only_p50_target: int
+    url_based_p50_target: int
+    max_web_sources: int
+    max_templates_per_request: int
+    max_reference_images: int
+    embedding_dimension: int
+
+
+class GeminiConfig(BaseModel):
+    """Gemini provider configuration."""
+
+    default_model: str
+    image_generation_model: str
+    enable_web_search: bool
+    embedding_model: str
+
+
+class LlmProvidersConfig(BaseModel):
+    """LLM providers configuration."""
+
+    gemini: GeminiConfig
+
+
+class LogoServiceConfig(BaseModel):
+    """Logo service configuration."""
+
+    image_base_url: str
+    api_base_url: str
+    cache_ttl: int
+
+
+class ObjectStorageConfig(BaseModel):
+    """Object storage configuration."""
+
+    provider: str
+    bucket: str
+    signed_url_expiry: int
+
+
+class RankingWeightsConfig(BaseModel):
+    """Ranking weights configuration."""
+
+    relevance: float
+    humor: float
+    clarity: float
+    originality: float
+    safety: float
+
+
+class RankingConfig(BaseModel):
+    """Ranking configuration."""
+
+    weights: RankingWeightsConfig
+    allow_per_request_override: bool
+
+
+class SafetyConfig(BaseModel):
+    """Safety configuration."""
+
+    default_mode: str
+    strict_mode_templates: list[str]
+    blocked_tags: list[str]

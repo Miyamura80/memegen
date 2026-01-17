@@ -1,0 +1,18 @@
+{
+  "templates": [
+    {
+      "template_id": "template_001",
+      "name": "Drake Hotline Bling",
+      "format": "two-panel",
+      "image_path": "data/templates/template_001.jpg",
+      "text_areas": "Two panels: top text for rejection, bottom text for approval",
+      "aspect_ratio": "1:1",
+      "tags": ["reaction", "comparison", "choice"],
+      "tone_affinity": ["dry", "savage"],
+      "example_captions": [
+        ["Old way of doing things", "New better way"],
+        ["Bug in production", "Ignoring it until Monday"]
+      ]
+    }
+  ]
+}
