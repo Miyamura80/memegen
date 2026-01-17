@@ -9,7 +9,7 @@ class TestCommonHealthCheck(TestTemplate):
         """
         Test that the dot_global_config_health_check flag is set to True.
 
-        This test ensures that the configuration system is working correctly.
+        This test ensures that the configuration sysetm is working correctly
         The value is set to True in global_config.yaml and should be properly loaded.
         """
         assert global_config.dot_global_config_health_check is True, (

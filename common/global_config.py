@@ -8,6 +8,7 @@ from typing import Any
 from dotenv import load_dotenv, dotenv_values
 from loguru import logger
 from pydantic import Field, field_validator
+from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
     SettingsConfigDict,
@@ -15,12 +16,18 @@ from pydantic_settings import (
 )
 
 # Import configuration models
-from .config_models import (
+from common.config_models import (
     ExampleParent,
     DefaultLlm,
     LlmConfig,
     LoggingConfig,
+    AgentChatConfig,
+    SubscriptionConfig,
+    StripeConfig,
+    TelegramConfig,
+    ServerConfig,
 )
+from common.db_uri_resolver import resolve_db_uri
 
 # Get the path to the root directory (one level up from common)
 root_dir = Path(__file__).parent.parent
@@ -102,7 +109,9 @@ class YamlSettingsSource(PydanticBaseSettingsSource):
 
         return config_data
 
-    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+    def get_field_value(
+        self, field: FieldInfo, field_name: str
+    ) -> tuple[Any, str, bool]:
         """Get field value from YAML data."""
         field_value = self.yaml_data.get(field_name)
         return field_value, field_name, False
@@ -132,13 +141,18 @@ class Config(BaseSettings):
         extra="allow",
     )
 
-    # Top-level fields
+    # Top-level YAML fields
     model_name: str
     dot_global_config_health_check: bool
     example_parent: ExampleParent
     default_llm: DefaultLlm
     llm_config: LlmConfig
     logging: LoggingConfig
+    agent_chat: AgentChatConfig
+    subscription: SubscriptionConfig
+    stripe: StripeConfig
+    telegram: TelegramConfig
+    server: ServerConfig
 
     # Environment variables (required)
     DEV_ENV: str
@@ -147,10 +161,26 @@ class Config(BaseSettings):
     GROQ_API_KEY: str
     PERPLEXITY_API_KEY: str
     GEMINI_API_KEY: str
+    CEREBRAS_API_KEY: str
+    BACKEND_DB_URI: str
+    TELEGRAM_BOT_TOKEN: str
+    STRIPE_TEST_SECRET_KEY: str
+    STRIPE_TEST_WEBHOOK_SECRET: str
+    STRIPE_SECRET_KEY: str
+    STRIPE_WEBHOOK_SECRET: str
+    TEST_USER_EMAIL: str
+    TEST_USER_PASSWORD: str
+    WORKOS_API_KEY: str
+    WORKOS_CLIENT_ID: str
+    SESSION_SECRET_KEY: str
+
+    # Optional environment variables
+    RAILWAY_PRIVATE_DOMAIN: str | None = Field(default=None)
 
     # Runtime environment (computed)
     is_local: bool = Field(default=False)
     running_on: str = Field(default="")
+    database_uri: str = Field(default="")
 
     @field_validator("is_local", mode="before")
     @classmethod
@@ -164,6 +194,28 @@ class Config(BaseSettings):
         """Set running_on based on is_local."""
         is_local = os.getenv("GITHUB_ACTIONS") != "true"
         return "🖥️  local" if is_local else "☁️  CI"
+
+    def model_post_init(self, _context: Any) -> None:
+        """Post-initialization to set computed fields that depend on other fields."""
+        # Resolve database URI using the db_uri_resolver
+        railway_domain = os.environ.get("RAILWAY_PRIVATE_DOMAIN")
+        resolved_uri = resolve_db_uri(self.BACKEND_DB_URI, railway_domain)
+
+        # Use object.__setattr__ to set on frozen model
+        object.__setattr__(self, "database_uri", resolved_uri)
+        object.__setattr__(self, "RAILWAY_PRIVATE_DOMAIN", railway_domain)
+
+        # Log Railway domain resolution
+        if railway_domain:
+            if resolved_uri == self.BACKEND_DB_URI:
+                logger.warning(
+                    "RAILWAY_PRIVATE_DOMAIN provided but invalid; using BACKEND_DB_URI"
+                )
+            else:
+                logger.info(
+                    "Using RAILWAY_PRIVATE_DOMAIN for database connections: "
+                    f"{railway_domain}"
+                )
 
     @classmethod
     def settings_customise_sources(
@@ -196,42 +248,43 @@ class Config(BaseSettings):
     def llm_api_key(self, model_name: str | None = None) -> str:
         """Returns the appropriate API key based on the model name."""
         model_identifier = model_name or self.model_name
-        if "gpt" in model_identifier.lower() or re.match(
-            OPENAI_O_SERIES_PATTERN, model_identifier.lower()
+        model_identifier_lower = model_identifier.lower()
+
+        # Provider-specific checks first to avoid the generic "gpt" catch-all
+        if "cerebras" in model_identifier_lower:
+            return self.CEREBRAS_API_KEY
+        if "groq" in model_identifier_lower:
+            return self.GROQ_API_KEY
+        if "perplexity" in model_identifier_lower:
+            return self.PERPLEXITY_API_KEY
+        if "gemini" in model_identifier_lower:
+            return self.GEMINI_API_KEY
+        if "claude" in model_identifier_lower or "anthropic" in model_identifier_lower:
+            return self.ANTHROPIC_API_KEY
+        if "gpt" in model_identifier_lower or re.match(
+            OPENAI_O_SERIES_PATTERN, model_identifier_lower
         ):
             return self.OPENAI_API_KEY
-        elif (
-            "claude" in model_identifier.lower()
-            or "anthropic" in model_identifier.lower()
-        ):
-            return self.ANTHROPIC_API_KEY
-        elif "groq" in model_identifier.lower():
-            return self.GROQ_API_KEY
-        elif "perplexity" in model_identifier.lower():
-            return self.PERPLEXITY_API_KEY
-        elif "gemini" in model_identifier.lower():
-            return self.GEMINI_API_KEY
-        else:
-            raise ValueError(f"No API key configured for model: {model_identifier}")
+
+        raise ValueError(f"No API key configured for model: {model_identifier}")
 
     def api_base(self, model_name: str) -> str:
-        """Returns the Helicone link for the model.
+        """Returns the provider base URL for the model."""
+        model_lower = model_name.lower()
 
-        Raises:
-            ValueError: If no API base is configured for the given model.
-        """
-        if "gpt" in model_name.lower() or re.match(
-            OPENAI_O_SERIES_PATTERN, model_name.lower()
-        ):
-            return "https://oai.hconeai.com/v1"
-        elif "groq" in model_name.lower():
-            return "https://groq.helicone.ai/openai/v1"
-        elif "perplexity" in model_name.lower():
-            return "https://perplexity.helicone.ai"
-        elif "gemini" in model_name.lower():
+        if "cerebras" in model_lower:
+            return "https://api.cerebras.ai/v1"
+        if "groq" in model_lower:
+            return "https://api.groq.com/openai/v1"
+        if "perplexity" in model_lower:
+            return "https://api.perplexity.ai"
+        if "gemini" in model_lower:
             return "https://generativelanguage.googleapis.com/v1beta/openai/"
-        else:
-            raise ValueError(f"No API base configured for model: {model_name}")
+        if "gpt" in model_lower or re.match(OPENAI_O_SERIES_PATTERN, model_lower):
+            return "https://api.openai.com/v1"
+
+        logger.error(f"Provider API base not found for model: {model_name}")
+        return ""
 
 
 # Load .env files before creating the config instance
@@ -251,4 +304,4 @@ if is_local:
         warnings.warn(f"{env_file_to_check} file not found or empty", UserWarning)
 
 # Create a singleton instance
-global_config = Config()
+global_config = Config()  # type: ignore[call-arg]
