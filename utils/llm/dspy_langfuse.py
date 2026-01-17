@@ -43,7 +43,12 @@ NOTE: We use contextvars to store the current state of the callback, so it is th
 
 # 1. Define a custom callback class that extends BaseCallback class
 class LangFuseDSPYCallback(BaseCallback):  # noqa
-    def __init__(self, signature: type[dspy_Signature]) -> None:
+    def __init__(
+        self,
+        signature: type[dspy_Signature],
+        trace_id: Optional[str] = None,
+        parent_observation_id: Optional[str] = None,
+    ) -> None:
         super().__init__()
         # Use contextvars for per-call state
         self.current_system_prompt = contextvars.ContextVar[str](
@@ -63,9 +68,15 @@ class LangFuseDSPYCallback(BaseCallback):  # noqa
         self.current_tool_span = contextvars.ContextVar[Optional[Any]](
             "current_tool_span"
         )
+        self.current_tool_call_id = contextvars.ContextVar[Optional[str]](
+            "current_tool_call_id"
+        )
         # Initialize Langfuse client
         self.langfuse = Langfuse()
         self.input_field_names = signature.input_fields.keys()
+        # Store explicit trace context for when langfuse_context is not available
+        self._explicit_trace_id = trace_id
+        self._explicit_parent_observation_id = parent_observation_id
 
     def on_module_start(  # noqa
         self,  # noqa
@@ -91,9 +102,15 @@ class LangFuseDSPYCallback(BaseCallback):  # noqa
         outputs: Optional[Any],
         exception: Optional[Exception] = None,  # noqa
     ) -> None:
+        # Only update observation if one exists in the current context
+        # (i.e., when using @observe decorator, not explicit trace_id)
+        current_obs_id = langfuse_context.get_current_observation_id()
+        if not current_obs_id:
+            return
+
         metadata = {
             "existing_trace_id": langfuse_context.get_current_trace_id(),
-            "parent_observation_id": langfuse_context.get_current_observation_id(),
+            "parent_observation_id": current_obs_id,
         }
         outputs_extracted = {}  # Default to empty dict
         if outputs is not None:
@@ -135,8 +152,13 @@ class LangFuseDSPYCallback(BaseCallback):  # noqa
         self.current_system_prompt.set(system_prompt)
         self.current_prompt.set(user_input)
         self.model_name_at_span_creation.set(model_name)
-        trace_id = langfuse_context.get_current_trace_id()
-        parent_observation_id = langfuse_context.get_current_observation_id()
+        # Prefer explicit trace context if provided, otherwise fall back to langfuse_context
+        # This ensures manual trace creation takes precedence over @observe() decorators
+        trace_id = self._explicit_trace_id or langfuse_context.get_current_trace_id()
+        parent_observation_id = (
+            self._explicit_parent_observation_id
+            or langfuse_context.get_current_observation_id()
+        )
         span_obj: Optional[StatefulGenerationClient] = None
         if trace_id:
             span_obj = self.langfuse.generation(  # type: ignore (Langfuse fails the type check in this function, grr...)
@@ -374,26 +396,36 @@ class LangFuseDSPYCallback(BaseCallback):  # noqa
         inputs: dict[str, Any],
     ) -> None:
         """Called when a tool execution starts."""
-        tool_name = getattr(instance, "__name__", None) or getattr(
-            instance, "name", None
-        ) or str(type(instance).__name__)
-        
+        tool_name = (
+            getattr(instance, "__name__", None)
+            or getattr(instance, "name", None)
+            or str(type(instance).__name__)
+        )
+
         # Skip internal DSPy tools
         if tool_name in self.INTERNAL_TOOLS:
             self.current_tool_span.set(None)
+            self.current_tool_call_id.set(None)
             return
-        
+
         # Extract tool arguments
         tool_args = inputs.get("args", {})
         if not tool_args:
             # Try to get kwargs directly
-            tool_args = {k: v for k, v in inputs.items() if k not in ["call_id", "instance"]}
-        
+            tool_args = {
+                k: v for k, v in inputs.items() if k not in ["call_id", "instance"]
+            }
+
         log.debug(f"Tool call started: {tool_name} with args: {tool_args}")
-        
-        trace_id = langfuse_context.get_current_trace_id()
-        parent_observation_id = langfuse_context.get_current_observation_id()
-        
+
+        # Prefer explicit trace context if provided, otherwise fall back to langfuse_context
+        # This ensures manual trace creation takes precedence over @observe() decorators
+        trace_id = self._explicit_trace_id or langfuse_context.get_current_trace_id()
+        parent_observation_id = (
+            self._explicit_parent_observation_id
+            or langfuse_context.get_current_observation_id()
+        )
+
         if trace_id:
             # Create a span for the tool call
             tool_span = self.langfuse.span(
@@ -407,6 +439,7 @@ class LangFuseDSPYCallback(BaseCallback):  # noqa
                 },
             )
             self.current_tool_span.set(tool_span)
+            self.current_tool_call_id.set(call_id)
 
     def on_tool_end(  # noqa
         self,  # noqa
@@ -416,12 +449,22 @@ class LangFuseDSPYCallback(BaseCallback):  # noqa
     ) -> None:
         """Called when a tool execution ends."""
         tool_span = self.current_tool_span.get(None)
-        
+        expected_call_id = self.current_tool_call_id.get(None)
+
+        # Only process if this is the matching tool call (prevents duplicate processing
+        # when DSPy's internal tools like "Finish" trigger on_tool_end without on_tool_start)
+        if call_id != expected_call_id:
+            log.debug(
+                f"Skipping on_tool_end for call_id={call_id} "
+                f"(expected={expected_call_id}, likely internal DSPy tool)"
+            )
+            return
+
         if tool_span:
             level: Literal["DEFAULT", "WARNING", "ERROR"] = "DEFAULT"
             status_message: Optional[str] = None
             output_value: Any = None
-            
+
             if exception:
                 level = "ERROR"
                 status_message = str(exception)
@@ -438,12 +481,13 @@ class LangFuseDSPYCallback(BaseCallback):  # noqa
                         output_value = str(outputs)
                 except Exception as e:
                     output_value = {"serialization_error": str(e), "raw": str(outputs)}
-            
+
             tool_span.end(
                 output=output_value,
                 level=level,
                 status_message=status_message,
             )
             self.current_tool_span.set(None)
-            
+            self.current_tool_call_id.set(None)
+
             log.debug(f"Tool call ended with output: {str(output_value)[:100]}...")
